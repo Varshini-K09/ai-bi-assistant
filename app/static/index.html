@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mini AI BI Assistant</title>
+<style>
+  :root { --bg:#f5f7fb; --card:#fff; --ink:#1b2430; --muted:#667085; --line:#e4e7ec;
+          --brand:#3b5bdb; --ok:#12805c; --warn:#b54708; --bad:#b42318; --bar:#dbe4ff; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f141b; --card:#18202b; --ink:#e8edf4; --muted:#93a1b5; --line:#2a3544;
+            --brand:#7c9cff; --ok:#4ade9b; --warn:#fbbf6a; --bad:#ff8a80; --bar:#26365f; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; background:var(--bg); color:var(--ink); }
+  main { max-width:900px; margin:0 auto; padding:28px 16px 60px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px; margin-bottom:16px; }
+  form { display:flex; gap:8px; }
+  input[type=text] { flex:1; padding:11px 13px; font-size:15px; border:1px solid var(--line); border-radius:8px;
+                     background:var(--bg); color:var(--ink); }
+  input:focus { outline:2px solid var(--brand); outline-offset:1px; }
+  button { padding:11px 18px; font-size:15px; border:0; border-radius:8px; background:var(--brand); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:wait; }
+  .chips { margin-top:12px; display:flex; flex-wrap:wrap; gap:6px; }
+  .chip { background:transparent; color:var(--brand); border:1px solid var(--line); padding:5px 10px; font-size:13px; border-radius:999px; }
+  .chip:hover { border-color:var(--brand); }
+  .answer { font-size:17px; font-weight:600; margin:0 0 4px; }
+  .answer.unsupported { color:var(--warn); } .answer.invalid, .answer.error { color:var(--bad); }
+  .meta { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0 0; }
+  .badge { font-size:12px; padding:2px 8px; border-radius:999px; border:1px solid var(--line); color:var(--muted); }
+  h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin:0 0 8px; }
+  .scroll { overflow-x:auto; }
+  table { border-collapse:collapse; width:100%; font-size:14px; }
+  th, td { padding:7px 10px; text-align:left; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  tr.total td { font-weight:700; }
+  .barcell { position:relative; }
+  .barcell .bar { position:absolute; inset:3px auto 3px 0; background:var(--bar); border-radius:4px; z-index:0; }
+  .barcell span { position:relative; z-index:1; }
+  ul.notes { margin:0; padding-left:18px; color:var(--muted); font-size:13px; }
+  details summary { cursor:pointer; color:var(--muted); font-size:13px; }
+  pre { background:var(--bg); padding:10px; border-radius:8px; overflow-x:auto; font-size:12.5px; margin:6px 0; }
+  .hidden { display:none; }
+  #status { font-size:12px; color:var(--muted); margin-top:18px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Mini AI Business Intelligence Assistant</h1>
+  <p class="sub">Ask about the sales data in plain English. Every number comes from a SQL query, shown below the answer.</p>
+
+  <div class="card">
+    <form id="form">
+      <input id="q" type="text" maxlength="500" autocomplete="off" autofocus
+             placeholder="e.g. Which product generated the highest revenue?" aria-label="Your question">
+      <button id="go" type="submit">Ask</button>
+    </form>
+    <div class="chips" id="chips"></div>
+  </div>
+
+  <div id="result" class="hidden"></div>
+  <div id="status">Connecting…</div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+
+const MONEY_COLS = /revenue|sales|discount|price|change/i;
+function fmtCell(col, v) {
+  if (v === null || v === undefined) return "–";
+  if (typeof v !== "number") return String(v);
+  if (/pct|share/i.test(col)) return v.toLocaleString("en-IN", { maximumFractionDigits: 2 }) + "%";
+  if (MONEY_COLS.test(col)) return "₹" + v.toLocaleString("en-IN", { maximumFractionDigits: 2 });
+  return v.toLocaleString("en-IN");
+}
+
+function renderTable(columns, rows) {
+  const wrap = el("div", "scroll"), table = el("table"), thead = el("thead"), hr = el("tr");
+  columns.forEach(c => hr.appendChild(el("th", null, c.replace(/_/g, " "))));
+  thead.appendChild(hr); table.appendChild(thead);
+  const revIdx = columns.indexOf("net_revenue");
+  const max = revIdx >= 0 ? Math.max(...rows.map(r => Math.abs(r[revIdx] || 0)), 1) : 0;
+  const tbody = el("tbody");
+  rows.forEach(r => {
+    const tr = el("tr", r[0] === "TOTAL" ? "total" : null);
+    r.forEach((v, i) => {
+      const td = el("td", typeof v === "number" ? "num" : null);
+      if (i === revIdx && columns.length > 2 && rows.length > 1) {
+        td.classList.add("barcell");
+        const bar = el("div", "bar"); bar.style.width = (Math.abs(v) / max * 100) + "%";
+        td.appendChild(bar); td.appendChild(el("span", null, fmtCell(columns[i], v)));
+      } else td.textContent = fmtCell(columns[i], v);
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody); wrap.appendChild(table); return wrap;
+}
+
+// All server text is inserted with textContent (never innerHTML), so echoed user input cannot inject HTML.
+function render(data) {
+  const box = $("result"); box.className = ""; box.replaceChildren();
+
+  const top = el("div", "card");
+  top.appendChild(el("p", "answer " + (data.status || ""), data.answer || "No answer."));
+  const meta = el("div", "meta");
+  if (data.intent) meta.appendChild(el("span", "badge", "intent: " + data.intent));
+  if (data.interpreted_by) meta.appendChild(el("span", "badge", "interpreted by: " + data.interpreted_by));
+  if (data.params && Object.keys(data.params).length)
+    meta.appendChild(el("span", "badge", "params: " + JSON.stringify(data.params)));
+  top.appendChild(meta);
+  if (data.llm_error) top.appendChild(el("p", "sub", "LLM note: " + data.llm_error + " — answered with the rule-based interpreter."));
+  box.appendChild(top);
+
+  if (data.columns && data.rows && data.rows.length) {
+    const c = el("div", "card"); c.appendChild(el("h2", null, "Supporting data"));
+    c.appendChild(renderTable(data.columns, data.rows)); box.appendChild(c);
+  }
+  if (data.notes && data.notes.length) {
+    const c = el("div", "card"); c.appendChild(el("h2", null, "Notes & assumptions"));
+    const ul = el("ul", "notes"); data.notes.forEach(n => ul.appendChild(el("li", null, n))); c.appendChild(ul); box.appendChild(c);
+  }
+  if (data.queries && data.queries.length) {
+    const c = el("div", "card"), d = el("details"); d.appendChild(el("summary", null, "SQL used (parameterised)"));
+    data.queries.forEach(q => {
+      d.appendChild(el("div", "sub", q.label));
+      d.appendChild(el("pre", null, q.sql + "\n-- params: " + JSON.stringify(q.params)));
+    });
+    c.appendChild(d); box.appendChild(c);
+  }
+  if (data.suggestions && data.suggestions.length) {
+    const c = el("div", "card"); c.appendChild(el("h2", null, "Try one of these"));
+    const chips = el("div", "chips"); data.suggestions.forEach(s => chips.appendChild(chipFor(s))); c.appendChild(chips); box.appendChild(c);
+  }
+}
+
+function chipFor(text) {
+  const b = el("button", "chip", text); b.type = "button";
+  b.onclick = () => { $("q").value = text; ask(text); }; return b;
+}
+
+async function ask(question) {
+  question = (question || "").trim();
+  if (!question) { render({ status: "error", answer: "Please enter a question." }); return; }
+  $("go").disabled = true; $("go").textContent = "Thinking…";
+  try {
+    const resp = await fetch("/api/ask", { method: "POST", headers: { "Content-Type": "application/json" },
+                                           body: JSON.stringify({ question }) });
+    render(await resp.json());
+  } catch (e) {
+    render({ status: "error", answer: "Could not reach the server. Is it running?" });
+  } finally { $("go").disabled = false; $("go").textContent = "Ask"; }
+}
+
+$("form").addEventListener("submit", (e) => { e.preventDefault(); ask($("q").value); });
+
+(async function init() {
+  try {
+    const ex = await (await fetch("/api/examples")).json();
+    ex.examples.forEach(s => $("chips").appendChild(chipFor(s)));
+    const h = await (await fetch("/api/health")).json();
+    $("status").textContent = `Ready · ${h.rows_loaded} rows loaded, ${h.rows_rejected} rejected · interpreter: ${h.llm_provider}` + (h.llm_model ? ` (${h.llm_model})` : "");
+  } catch (e) { $("status").textContent = "Server not reachable."; }
+})();
+</script>
+</body>
+</html>
