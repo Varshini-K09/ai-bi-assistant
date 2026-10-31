@@ -1,15 +1,3 @@
-"""Deterministic analytics engine.
-
-This is the ONLY place that touches the sales data. The LLM never writes SQL
-and never produces a number: it only picks an *intent* and *parameters*.
-Both are validated here against a whitelist and against the real contents of
-the database before any SQL is executed. All SQL below is a fixed template
-with ``?`` placeholders, so user text can never be concatenated into a query.
-
-Revenue definition (stated in every answer's notes):
-    net revenue = quantity * unit_price - discount_amount
-    counted only for rows with status = 'Completed'  (Returned orders excluded)
-"""
 from __future__ import annotations
 
 import calendar
@@ -19,28 +7,32 @@ from dataclasses import dataclass, field
 
 CURRENCY_SYMBOL = "₹"
 
-# Column whitelist. User/LLM supplied names are mapped through these dicts and
-# never inserted into SQL directly.
 DIMENSIONS = {
     "product": "product",
     "category": "category",
     "region": "region",
     "channel": "sales_channel",
 }
-FILTER_COLUMNS = {**DIMENSIONS}  # same columns can be used as filters
+FILTER_COLUMNS = {**DIMENSIONS}  
 
 NET_REVENUE = "(quantity * unit_price - discount_amount)"
 GROSS_SALES = "(quantity * unit_price)"
 
-# Single source of truth for supported intents (also fed into the LLM prompt).
 INTENTS = {
     "total_revenue": "Total net revenue, optionally filtered (product/category/region/channel/month).",
     "top_by": "Rank a dimension (product, category, region or channel) by revenue; "
-              "param 'dimension' and 'order' ('highest' or 'lowest').",
+              "param 'dimension', 'order' ('highest' or 'lowest') and optional 'limit' for top-N (e.g. 3).",
     "monthly_trend": "Revenue for every month, with month-over-month change.",
     "month_comparison": "Compare revenue between two months; params 'month_a' and 'month_b' as YYYY-MM.",
+    "average_order_value": "Average revenue per completed order, optionally filtered; "
+                           "add param 'dimension' to break it down by product/category/region/channel.",
+    "sales_volume": "Number of completed orders and units sold, optionally filtered; "
+                    "add param 'dimension' to break it down (e.g. 'which product sold the most units').",
+    "month_extreme": "Which single month had the highest or lowest revenue; param 'order' "
+                     "('highest' or 'lowest'), optionally filtered by product/category/region/channel.",
     "data_quality": "Which CSV records were rejected or excluded, and why.",
 }
+MAX_LIMIT = 50
 
 
 class QueryValidationError(ValueError):
@@ -55,13 +47,14 @@ class AnalyticsResult:
     answer: str
     columns: list[str]
     rows: list[list]
-    queries: list[dict] = field(default_factory=list)  # [{label, sql, params}]
+    queries: list[dict] = field(default_factory=list)  
     notes: list[str] = field(default_factory=list)
 
 
-# --------------------------------------------------------------------------- #
-# Formatting helpers
-# --------------------------------------------------------------------------- #
+def plural(dim: str) -> str:
+    return "categories" if dim == "category" else f"{dim}s"
+
+
 def fmt_money(value: float | int | None) -> str:
     """Indian digit grouping (12,34,567) with the currency symbol."""
     value = value or 0
@@ -90,9 +83,6 @@ def _fmt_pct(p: float | None) -> str:
     return "n/a (previous value is zero)" if p is None else f"{p:+.2f}%"
 
 
-# --------------------------------------------------------------------------- #
-# Catalog: what values really exist in the database (anti-hallucination guard)
-# --------------------------------------------------------------------------- #
 def load_catalog(conn: sqlite3.Connection) -> dict:
     catalog: dict = {}
     for key, col in DIMENSIONS.items():
@@ -135,7 +125,8 @@ def normalise_request(intent: str, params: dict | None, catalog: dict) -> dict:
     params = dict(params or {})
     clean: dict = {}
 
-    if intent in ("total_revenue", "top_by", "monthly_trend"):
+    if intent in ("total_revenue", "top_by", "monthly_trend", "average_order_value",
+                  "sales_volume", "month_extreme"):
         filters: dict = {}
         for key in FILTER_COLUMNS:
             if params.get(key) not in (None, ""):
@@ -155,9 +146,32 @@ def normalise_request(intent: str, params: dict | None, catalog: dict) -> dict:
         clean["dimension"] = dim
         clean["order"] = order
         clean["filters"].pop(dim, None)  # filtering on the ranked dimension is meaningless
+        if params.get("limit") not in (None, ""):
+            try:
+                limit = int(float(str(params["limit"]).strip()))
+            except ValueError:
+                raise QueryValidationError(f"Invalid top-N value '{params['limit']}'. Use a whole number like 3.")
+            if not 1 <= limit <= MAX_LIMIT:
+                raise QueryValidationError(f"Top-N must be between 1 and {MAX_LIMIT}.")
+            clean["limit"] = limit
 
-    if intent == "monthly_trend":
-        clean["filters"].pop("month", None)  # a trend spans all months
+    if intent in ("average_order_value", "sales_volume"):
+        dim = str(params.get("dimension") or "").strip().lower()
+        if dim:
+            if dim not in DIMENSIONS:
+                raise QueryValidationError(
+                    f"Unknown dimension '{dim}'. Choose one of: {', '.join(DIMENSIONS)}.")
+            clean["dimension"] = dim
+            clean["filters"].pop(dim, None)
+        order = str(params.get("order", "highest")).strip().lower()
+        clean["order"] = order if order in ("highest", "lowest") else "highest"
+
+    if intent == "month_extreme":
+        order = str(params.get("order", "highest")).strip().lower()
+        clean["order"] = order if order in ("highest", "lowest") else "highest"
+
+    if intent in ("monthly_trend", "month_extreme"):
+        clean["filters"].pop("month", None)  # these span all months
 
     if intent == "month_comparison":
         a, b = params.get("month_a"), params.get("month_b")
@@ -166,13 +180,10 @@ def normalise_request(intent: str, params: dict | None, catalog: dict) -> dict:
         a, b = _check_month(a, catalog), _check_month(b, catalog)
         if a == b:
             raise QueryValidationError("Please pick two different months to compare.")
-        clean["month_a"], clean["month_b"] = sorted((a, b))  # earlier month = baseline
+        clean["month_a"], clean["month_b"] = sorted((a, b))  
     return clean
 
 
-# --------------------------------------------------------------------------- #
-# SQL building (column names come from the whitelist, values are bound)
-# --------------------------------------------------------------------------- #
 def _where(filters: dict, status: str | None = "Completed") -> tuple[str, list]:
     clauses: list[str] = []
     args: list = []
@@ -221,9 +232,6 @@ def _common_notes(conn: sqlite3.Connection, filters: dict, queries: list[dict],
     return notes
 
 
-# --------------------------------------------------------------------------- #
-# Intent handlers
-# --------------------------------------------------------------------------- #
 def _total_revenue(conn, p) -> AnalyticsResult:
     filters = p["filters"]
     where, args = _where(filters)
@@ -248,7 +256,7 @@ def _total_revenue(conn, p) -> AnalyticsResult:
 
 
 def _top_by(conn, p) -> AnalyticsResult:
-    dim, order, filters = p["dimension"], p["order"], p["filters"]
+    dim, order, filters, limit = p["dimension"], p["order"], p["filters"], p.get("limit")
     col = DIMENSIONS[dim]
     where, args = _where(filters)
     direction = "DESC" if order == "highest" else "ASC"
@@ -262,21 +270,33 @@ def _top_by(conn, p) -> AnalyticsResult:
         answer = f"There are no completed orders{scope}, so no {dim} can be ranked."
         return AnalyticsResult("top_by", p, answer, [dim, "orders", "units", "net_revenue"], [],
                                queries, _common_notes(conn, filters, queries))
-    total = sum(r["net_revenue"] for r in rows)
+    total = sum(r["net_revenue"] for r in rows)      
+    notes = _common_notes(conn, filters, queries)
     best = rows[0]
-    tied = [r[dim] for r in rows if r["net_revenue"] == best["net_revenue"]]
-    share = best["net_revenue"] / total * 100 if total else 0
-    if len(tied) > 1:
-        answer = (f"{len(tied)} {dim}s are tied for {order} revenue{scope}: "
-                  f"{', '.join(tied)} with {fmt_money(best['net_revenue'])} each.")
+    if limit and limit > 1:
+        shown = rows[:limit]
+        label = "Top" if order == "highest" else "Bottom"
+        items = "; ".join(f"{i}. {r[dim]} ({fmt_money(r['net_revenue'])})" for i, r in enumerate(shown, 1))
+        answer = f"{label} {len(shown)} {plural(dim)} by revenue{scope}: {items}."
+        if len(shown) < limit:
+            notes.append(f"Only {len(rows)} {plural(dim)} exist in this scope, so fewer than {limit} are shown.")
+        else:
+            notes.append(f"Showing {len(shown)} of {len(rows)} {plural(dim)}; percentages are of the all-{dim} total "
+                         f"({fmt_money(total)}).")
+        rows = shown
     else:
-        answer = (f"The {dim} with the {order} revenue{scope} is {best[dim]} "
-                  f"with {fmt_money(best['net_revenue'])} ({share:.1f}% of {fmt_money(total)} total).")
+        tied = [r[dim] for r in rows if r["net_revenue"] == best["net_revenue"]]
+        share = best["net_revenue"] / total * 100 if total else 0
+        if len(tied) > 1:
+            answer = (f"{len(tied)} {dim}s are tied for {order} revenue{scope}: "
+                      f"{', '.join(tied)} with {fmt_money(best['net_revenue'])} each.")
+        else:
+            answer = (f"The {dim} with the {order} revenue{scope} is {best[dim]} "
+                      f"with {fmt_money(best['net_revenue'])} ({share:.1f}% of {fmt_money(total)} total).")
     data = [[r[dim], r["orders"], r["units"], r["net_revenue"],
              round(r["net_revenue"] / total * 100, 2) if total else 0] for r in rows]
     return AnalyticsResult("top_by", p, answer,
-                           [dim, "orders", "units", "net_revenue", "share_pct"], data,
-                           queries, _common_notes(conn, filters, queries))
+                           [dim, "orders", "units", "net_revenue", "share_pct"], data, queries, notes)
 
 
 def _monthly_trend(conn, p) -> AnalyticsResult:
@@ -338,6 +358,104 @@ def _month_comparison(conn, p) -> AnalyticsResult:
                            ["product", f"revenue_{a}", f"revenue_{b}", "change"], data, queries, notes)
 
 
+def _grouped_or_overall(conn, p, select_extra: str):
+    """Shared query for AOV / volume: overall row, or one row per dimension value."""
+    filters, dim = p["filters"], p.get("dimension")
+    where, args = _where(filters)
+    if dim:
+        col = DIMENSIONS[dim]
+        sql = (f"SELECT {col} AS {dim}, COUNT(*) AS orders, COALESCE(SUM(quantity), 0) AS units, "
+               f"COALESCE(SUM{NET_REVENUE}, 0) AS net_revenue FROM sales{where} GROUP BY {col}")
+    else:
+        sql = (f"SELECT COUNT(*) AS orders, COALESCE(SUM(quantity), 0) AS units, "
+               f"COALESCE(SUM{NET_REVENUE}, 0) AS net_revenue FROM sales{where}")
+    rows = [dict(r) for r in conn.execute(sql, args).fetchall()]
+    return rows, [{"label": select_extra, "sql": sql, "params": args}]
+
+
+def _average_order_value(conn, p) -> AnalyticsResult:
+    filters, dim, order = p["filters"], p.get("dimension"), p["order"]
+    rows, queries = _grouped_or_overall(conn, p, "Orders and revenue for average order value")
+    scope = _describe(filters)
+    notes = _common_notes(conn, filters, queries)
+    notes.insert(1, "Average order value = net revenue ÷ number of completed orders (one CSV row = one order).")
+    if dim:
+        for r in rows:
+            r["aov"] = r["net_revenue"] / r["orders"] if r["orders"] else 0
+        rows.sort(key=lambda r: (-r["aov"] if order == "highest" else r["aov"], r[dim]))
+        if not rows:
+            return AnalyticsResult("average_order_value", p, f"There are no completed orders{scope}.",
+                                   [dim, "orders", "net_revenue", "avg_order_value"], [], queries, notes)
+        best = rows[0]
+        answer = (f"Average order value by {dim}{scope}: {best[dim]} has the {order} at "
+                  f"{fmt_money(best['aov'])} ({best['orders']} orders).")
+        data = [[r[dim], r["orders"], r["net_revenue"], round(r["aov"], 2)] for r in rows]
+        return AnalyticsResult("average_order_value", p, answer,
+                               [dim, "orders", "net_revenue", "avg_order_value"], data, queries, notes)
+    row = rows[0]
+    if row["orders"] == 0:
+        return AnalyticsResult("average_order_value", p, f"There are no completed orders{scope}, "
+                               "so there is no average order value.",
+                               ["orders", "net_revenue", "avg_order_value"], [], queries, notes)
+    aov = row["net_revenue"] / row["orders"]
+    answer = (f"The average order value{scope} is {fmt_money(aov)} "
+              f"({fmt_money(row['net_revenue'])} across {row['orders']} completed orders).")
+    return AnalyticsResult("average_order_value", p, answer, ["orders", "net_revenue", "avg_order_value"],
+                           [[row["orders"], row["net_revenue"], round(aov, 2)]], queries, notes)
+
+
+def _sales_volume(conn, p) -> AnalyticsResult:
+    filters, dim, order = p["filters"], p.get("dimension"), p["order"]
+    rows, queries = _grouped_or_overall(conn, p, "Orders and units sold")
+    scope = _describe(filters)
+    notes = _common_notes(conn, filters, queries)
+    notes.insert(1, "Orders and units count only 'Completed' orders (one CSV row = one order).")
+    if dim:
+        rows.sort(key=lambda r: (-r["units"] if order == "highest" else r["units"], r[dim]))
+        if not rows:
+            return AnalyticsResult("sales_volume", p, f"There are no completed orders{scope}.",
+                                   [dim, "orders", "units", "net_revenue"], [], queries, notes)
+        best = rows[0]
+        total_units = sum(r["units"] for r in rows)
+        answer = (f"The {dim} with the {order} units sold{scope} is {best[dim]} with {best['units']} units "
+                  f"({best['units'] / total_units * 100:.1f}% of {total_units} total).")
+        data = [[r[dim], r["orders"], r["units"], r["net_revenue"]] for r in rows]
+        return AnalyticsResult("sales_volume", p, answer, [dim, "orders", "units", "net_revenue"],
+                               data, queries, notes)
+    row = rows[0]
+    answer = (f"There are {row['orders']} completed orders{scope} with {row['units']} units sold.")
+    return AnalyticsResult("sales_volume", p, answer, ["orders", "units", "net_revenue"],
+                           [[row["orders"], row["units"], row["net_revenue"]]], queries, notes)
+
+
+def _month_extreme(conn, p) -> AnalyticsResult:
+    filters, order = p["filters"], p["order"]
+    where, args = _where(filters)
+    sql = (f"SELECT substr(order_date, 1, 7) AS month, COUNT(*) AS orders, "
+           f"SUM{NET_REVENUE} AS net_revenue FROM sales{where} GROUP BY month ORDER BY month")
+    rows = conn.execute(sql, args).fetchall()
+    queries = [{"label": "Revenue by month", "sql": sql, "params": args}]
+    scope = _describe(filters)
+    notes = _common_notes(conn, filters, queries)
+    if not rows:
+        return AnalyticsResult("month_extreme", p, f"There are no completed orders{scope}.",
+                               ["month", "orders", "net_revenue", "share_pct"], [], queries, notes)
+    total = sum(r["net_revenue"] for r in rows)
+    pick = max if order == "highest" else min
+    target = pick(r["net_revenue"] for r in rows)
+    winners = [r["month"] for r in rows if r["net_revenue"] == target]
+    if len(winners) > 1:
+        answer = (f"{len(winners)} months are tied for {order} revenue{scope}: "
+                  f"{', '.join(month_label(m) for m in winners)} with {fmt_money(target)} each.")
+    else:
+        answer = (f"The month with the {order} revenue{scope} is {month_label(winners[0])} "
+                  f"with {fmt_money(target)} ({target / total * 100:.1f}% of {fmt_money(total)} total).")
+    data = [[r["month"], r["orders"], r["net_revenue"],
+             round(r["net_revenue"] / total * 100, 2) if total else 0] for r in rows]
+    return AnalyticsResult("month_extreme", p, answer, ["month", "orders", "net_revenue", "share_pct"],
+                           data, queries, notes)
+
+
 def _data_quality(conn, p) -> AnalyticsResult:
     sql = "SELECT source_line, transaction_id, reason FROM rejected_records ORDER BY source_line"
     rejected = conn.execute(sql).fetchall()
@@ -360,6 +478,9 @@ _HANDLERS = {
     "top_by": _top_by,
     "monthly_trend": _monthly_trend,
     "month_comparison": _month_comparison,
+    "average_order_value": _average_order_value,
+    "sales_volume": _sales_volume,
+    "month_extreme": _month_extreme,
     "data_quality": _data_quality,
 }
 

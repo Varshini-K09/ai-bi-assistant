@@ -1,17 +1,15 @@
-"""Deterministic analytics. Expected numbers were cross-checked against an
-independent pandas calculation (see docs/AI_USAGE.md)."""
 import pytest
 
-from app.analytics import QueryValidationError, run_intent
-from app.database import build_database, get_readonly_connection
+from assistant.analytics import QueryValidationError, run_intent
+from assistant.database import build_database, get_readonly_connection
 
 
 def test_total_revenue(conn):
     r = run_intent(conn, "total_revenue", {})
-    assert r.rows[0][-1] == 1_439_200          # net revenue
-    assert r.rows[0][0] == 48                  # completed orders
+    assert r.rows[0][-1] == 1_439_200          
+    assert r.rows[0][0] == 48                  
     assert "₹14,39,200" in r.answer
-    assert any("returned" in n.lower() for n in r.notes)   # returned order disclosed
+    assert any("returned" in n.lower() for n in r.notes)   
 
 
 def test_top_product_is_monitor(conn):
@@ -44,7 +42,7 @@ def test_month_comparison_earlier_month_is_always_baseline(conn):
 
 def test_returned_orders_excluded_from_april(conn):
     r = run_intent(conn, "total_revenue", {"month": "2026-04"})
-    assert r.rows[0][-1] == 240_700               # TXN0033 (Returned, 19,000) not counted
+    assert r.rows[0][-1] == 240_700              
 
 
 def test_filters_combine_and_are_case_insensitive(conn):

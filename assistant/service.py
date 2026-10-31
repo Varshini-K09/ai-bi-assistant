@@ -1,6 +1,3 @@
-"""Orchestrates one question end-to-end:
-validate -> interpret (LLM or rules) -> validate params -> run SQL -> build response.
-"""
 from __future__ import annotations
 
 import logging
@@ -23,6 +20,10 @@ EXAMPLE_QUESTIONS = [
     "Total revenue for the North region in March",
     "Which sales channel performs best?",
     "Which records were rejected?",
+    "Top 3 products by revenue",
+    "What is the average order value by region?",
+    "Which product sold the most units?",
+    "Which month had the lowest revenue?",
 ]
 
 

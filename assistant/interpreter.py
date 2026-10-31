@@ -1,20 +1,3 @@
-"""Question -> (intent, params).
-
-Two interchangeable interpreters:
-
-1. LLM interpreter   - sends the question + the list of valid values to a free
-                       LLM (Ollama / Gemini) and asks for a tiny JSON object.
-2. Rule interpreter  - deterministic keyword/regex matching. Needs no LLM, so the
-                       app keeps working offline or when the LLM fails.
-
-Safety model (why wrong answers are unlikely):
-  * The LLM never writes SQL and never produces numbers.
-  * Its JSON is checked against a whitelist of intents and against the values
-    that really exist in the database (analytics.normalise_request).
-  * An "unknown term" guard refuses questions mentioning things we cannot
-    resolve (e.g. 'Central region', 'Q1', '2025') instead of silently ignoring
-    them and answering a different question.
-"""
 from __future__ import annotations
 
 import json
@@ -25,16 +8,12 @@ from dataclasses import dataclass, field
 from .analytics import DIMENSIONS, INTENTS
 from .llm import BaseProvider, LLMError
 
-
-# --------------------------------------------------------------------------- #
-# Result type
-# --------------------------------------------------------------------------- #
 @dataclass
 class Interpretation:
-    intent: str | None                 # None => cannot answer
+    intent: str | None                
     params: dict = field(default_factory=dict)
-    source: str = "rules"              # "llm" | "rules" | "rules (LLM unavailable)" ...
-    message: str | None = None         # why unsupported / what to clarify
+    source: str = "rules"              
+    message: str | None = None         
     notes: list[str] = field(default_factory=list)
     llm_error: str | None = None
 
@@ -43,9 +22,6 @@ class BadLLMOutput(Exception):
     """The LLM answered, but not with usable JSON."""
 
 
-# --------------------------------------------------------------------------- #
-# Month parsing
-# --------------------------------------------------------------------------- #
 MONTH_NUMBERS = {
     "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
     "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
@@ -57,7 +33,6 @@ _MONTH_RE = re.compile(
     r"sept?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)(?![a-z0-9])"
     r"(?:[\s,\-/']*(\d{4})(?!\d))?")
 _ISO_MONTH_RE = re.compile(r"(?<![\d-])(\d{4})-(0[1-9]|1[0-2])(?![\d-])")
-# 'may' is also a verb, so only treat it as a month in a month-like context.
 _MAY_CONTEXT = {"in", "for", "of", "during", "and", "to", "vs", "versus", "between", "from",
                 "than", "or", "with", "against", "over", "through", "till", "until", "month", "&", "since"}
 
@@ -96,9 +71,6 @@ def parse_months(text: str, catalog: dict) -> list[str]:
     return seen
 
 
-# --------------------------------------------------------------------------- #
-# Entity (product / region / ...) detection
-# --------------------------------------------------------------------------- #
 def _norm(text: str) -> str:
     return re.sub(r"[-_/]", " ", text.lower())
 
@@ -133,9 +105,6 @@ def detect_entities(text: str, catalog: dict) -> dict[str, list[str]]:
     return found
 
 
-# --------------------------------------------------------------------------- #
-# Unknown-term guard
-# --------------------------------------------------------------------------- #
 _PREP = r"(?:for|of|from|in|within|by|via|through|on|at|under|across|about|regarding)"
 _PHRASE_RE = re.compile(
     rf"(?<![a-z0-9]){_PREP}\s+(.+?)(?=\s+{_PREP}(?![a-z0-9])|\s+(?:and|vs|versus|to|than|compared|during|between|with)(?![a-z0-9])|[?.!,;]|$)")
@@ -147,13 +116,14 @@ sales sale revenue revenues order orders time trend trends date data dataset dat
 sold number amount value income turnover generated made earned top best highest lowest most least worst
 is are was were be been of detail details breakdown summary figures figure numbers
 money cash rupees rupee inr rs much many general terms term
+units unit quantity quantities pieces average avg mean aov volume count did does do have had has sell sells
+selling bring brought one two three four five six seven eight nine ten
 """.split())
 
 
 def find_unknown_terms(question: str, catalog: dict) -> list[str]:
     """Terms used as a filter/scope that we cannot resolve to real data."""
     text = question.lower()
-    # blank out recognised months (and their year) so they don't look unknown
     for start, end, _ in reversed(_month_matches(text, catalog)):
         text = text[:start] + " month " + text[end:]
     known: set[str] = set(MONTH_NUMBERS)
@@ -167,16 +137,12 @@ def find_unknown_terms(question: str, catalog: dict) -> list[str]:
     unknown: list[str] = []
     for phrase in _PHRASE_RE.findall(_norm(text)):
         for tok in re.findall(r"[a-z0-9]+", phrase):
-            if tok in _STOPWORDS or tok in known or tok in data_years:
+            if tok in _STOPWORDS or tok in known or tok in data_years or re.fullmatch(r"\d{1,2}", tok):
                 continue
             if tok not in unknown:
                 unknown.append(tok)
     return unknown
 
-
-# --------------------------------------------------------------------------- #
-# Rule-based interpreter
-# --------------------------------------------------------------------------- #
 _REVENUE_KW = re.compile(r"\b(revenue|revenues|sales|sale|turnover|income|earn\w*|sold|sell|sells|selling)\b")
 _DQ_KW = re.compile(r"\b(reject\w*|invalid|dirty|bad data|bad records?|data quality|missing|excluded?|"
                     r"returns?|returned|refund\w*|corrupt\w*|cleaned|cleaning|anomal\w*)\b")
@@ -188,12 +154,38 @@ _CHANGE_KW = re.compile(r"\b(change|changed|growth|grew|grow|increase|increased|
 _HIGH_KW = re.compile(r"\b(highest|top|best|most|largest|biggest|maximum|max|leading|greatest|strongest)\b")
 _LOW_KW = re.compile(r"\b(lowest|least|worst|smallest|minimum|min|weakest|bottom|poorest)\b")
 _BREAKDOWN_KW = re.compile(r"\b(by|per|each|every|wise|across|breakdown|split)\b")
-_DIM_WORDS = [  # priority order matters: 'product category' -> category
+_DIM_WORDS = [ 
     ("category", re.compile(r"\bcategor(?:y|ies)\b")),
     ("channel", re.compile(r"\bchannels?\b")),
     ("region", re.compile(r"\b(?:regions?|zones?|areas?|where)\b")),
     ("product", re.compile(r"\b(?:products?|items?|sku|skus)\b")),
 ]
+
+
+_AOV_KW = re.compile(r"\b(?:average|avg|mean)\b.*\b(?:order|orders|sale|sales|transaction|transactions|basket|ticket)\b"
+                    r"|\baov\b|\bper order\b|\bper transaction\b")
+_VOLUME_KW = re.compile(r"\b(?:units?|quantit(?:y|ies)|pieces|pcs)\b|\bhow many (?:completed )?orders\b|"
+                        r"\b(?:number|count|total) of (?:completed )?orders\b|\border count\b|"
+                        r"\bhow many (?:items|products|things)\b.*\b(?:sold|sell|sale)\b")
+_MONTH_EXTREME_KW = re.compile(r"\bmonth\b")
+_NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+              "nine": 9, "ten": 10}
+_LIMIT_RE = re.compile(r"\b(?:top|bottom|best|worst|first|last)\s+(\d{1,3}|" + "|".join(_NUM_WORDS) + r")\b")
+
+
+def _parse_limit(q: str) -> int | None:
+    m = _LIMIT_RE.search(q)
+    if not m:
+        return None
+    v = m.group(1)
+    return _NUM_WORDS.get(v) or int(v)
+
+
+def _breakdown_dim(q: str) -> str | None:
+    """Dimension for 'by region' / 'for each product' style breakdowns."""
+    dim = next((name for name, rx in _DIM_WORDS if rx.search(q)), None)
+    superlative = _HIGH_KW.search(q) or _LOW_KW.search(q)
+    return dim if dim and (_BREAKDOWN_KW.search(q.replace("per order", "")) or superlative) else None
 
 
 _OFF_TOPIC_KW = re.compile(r"\b(poem|poetry|story|song|joke|essay|haiku|lyrics|recipe|translate|"
@@ -212,7 +204,6 @@ def rule_interpret(question: str, catalog: dict) -> Interpretation:
     if _OFF_TOPIC_KW.search(q):
         return _unsupported("I can only answer questions about revenue and sales in the supplied data.")
 
-    # filters: only valid when each dimension has a single value
     filters: dict = {}
     for dim, values in entities.items():
         if len(values) > 1:
@@ -221,25 +212,43 @@ def rule_interpret(question: str, catalog: dict) -> Interpretation:
                 f"time, or ask 'revenue by {dim}' to see them side by side.")
         filters[dim] = values[0]
 
-    # 1. data quality (only when the question is not really about revenue)
     if _DQ_KW.search(q) and not has_revenue:
         return Interpretation("data_quality", {}, "rules")
 
-    # 2. month comparison
     if len(months) == 2 and (_COMPARE_KW.search(q) or _CHANGE_KW.search(q)):
         return Interpretation("month_comparison", {"month_a": months[0], "month_b": months[1]}, "rules")
     if _COMPARE_KW.search(q) and has_revenue and len(months) != 2 and not _TREND_KW.search(q):
         return _unsupported("To compare revenue I need exactly two months, "
                             "for example: 'How did revenue change between January and February?'")
 
-    # 3. monthly trend
+    wants_aov, wants_volume = bool(_AOV_KW.search(q)), bool(_VOLUME_KW.search(q))
+    asks_month_extreme = bool(_MONTH_EXTREME_KW.search(q) and (_HIGH_KW.search(q) or _LOW_KW.search(q))
+                              and not _TREND_KW.search(q) and not _COMPARE_KW.search(q))
+    order = "lowest" if _LOW_KW.search(q) and not _HIGH_KW.search(q) else "highest"
+    if (wants_aov or wants_volume) and not asks_month_extreme:
+        if len(months) > 1:
+            return _unsupported("Please ask about one month at a time (or all months together).")
+        params = dict(filters)
+        if months:
+            params["month"] = months[0]
+        dim = _breakdown_dim(q)
+        if dim:
+            params["dimension"] = dim
+            params["order"] = order
+        return Interpretation("average_order_value" if wants_aov else "sales_volume", params, "rules")
+    if asks_month_extreme:
+        if wants_aov or wants_volume:
+            return _unsupported("Best/worst month is available for revenue only, e.g. "
+                                "'Which month had the highest revenue?'")
+        notes = ["Best/worst month always compares all months; the month in your question was not used."] if months else []
+        return Interpretation("month_extreme", {**filters, "order": order}, "rules", notes=notes)
+
     if _TREND_KW.search(q) or (_CHANGE_KW.search(q) and has_revenue and not months):
         notes = []
         if months:
             notes.append("Trends always show every month; the month in your question was not used as a filter.")
         return Interpretation("monthly_trend", filters, "rules", notes=notes)
 
-    # 4. rankings / breakdowns
     dim = next((name for name, rx in _DIM_WORDS if rx.search(q)), None)
     superlative = _HIGH_KW.search(q) or _LOW_KW.search(q)
     if dim and (superlative or _BREAKDOWN_KW.search(q)) and (has_revenue or superlative):
@@ -250,11 +259,15 @@ def rule_interpret(question: str, catalog: dict) -> Interpretation:
             params["month"] = months[0]
         params["dimension"] = dim
         params["order"] = "lowest" if _LOW_KW.search(q) and not _HIGH_KW.search(q) else "highest"
+        limit = _parse_limit(q)
+        if limit:
+            params["limit"] = limit
+            if re.search(r"\b(?:bottom|worst|last)\s+(?:\d|" + "|".join(_NUM_WORDS) + r")", q):
+                params["order"] = "lowest"
         return Interpretation("top_by", params, "rules")
     if superlative and has_revenue and not dim:
         return _unsupported("Which should I rank by revenue: product, category, region or channel?")
 
-    # 5. total revenue (optionally filtered)
     if has_revenue or re.search(r"\bhow much\b.*\b(make|made|earn\w*)\b", q):
         if len(months) > 1:
             return _unsupported("For several months use 'monthly revenue trend', or compare exactly two months.")
@@ -266,9 +279,6 @@ def rule_interpret(question: str, catalog: dict) -> Interpretation:
     return _unsupported("I can only answer questions about revenue and sales in the supplied data.")
 
 
-# --------------------------------------------------------------------------- #
-# LLM interpreter
-# --------------------------------------------------------------------------- #
 def build_system_prompt(catalog: dict) -> str:
     p, c, r, ch = (catalog["product"], catalog["category"], catalog["region"], catalog["channel"])
     months = catalog["months"]
@@ -307,6 +317,16 @@ Q: Show the month by month revenue
 {{"intent":"monthly_trend","params":{{}}}}
 Q: How did revenue change from {months[0]} to {months[2]}?
 {{"intent":"month_comparison","params":{{"month_a":"{months[0]}","month_b":"{months[2]}"}}}}
+Q: Top 3 products by revenue
+{{"intent":"top_by","params":{{"dimension":"product","order":"highest","limit":3}}}}
+Q: What is the average order value in {r[0]}?
+{{"intent":"average_order_value","params":{{"region":"{r[0]}"}}}}
+Q: Which product sold the most units?
+{{"intent":"sales_volume","params":{{"dimension":"product","order":"highest"}}}}
+Q: How many orders did we complete?
+{{"intent":"sales_volume","params":{{}}}}
+Q: Which month had the lowest revenue?
+{{"intent":"month_extreme","params":{{"order":"lowest"}}}}
 Q: Which rows were invalid?
 {{"intent":"data_quality","params":{{}}}}
 Q: What is our profit margin?
@@ -346,6 +366,11 @@ def _clean_llm_params(params: dict, catalog: dict) -> dict:
             if not re.fullmatch(r"\d{4}-\d{2}", str(params[key]).strip()):
                 parsed = parse_months(str(params[key]), catalog)
                 params[key] = parsed[0] if parsed else str(params[key])
+    if "limit" in params:
+        try:
+            params["limit"] = int(float(str(params["limit"]).strip()))
+        except ValueError:
+            params.pop("limit")
     if "dimension" in params:
         d = str(params["dimension"]).strip().lower()
         params["dimension"] = _DIM_SYNONYMS.get(d, d)
@@ -367,10 +392,6 @@ def llm_interpret(question: str, catalog: dict, provider: BaseProvider) -> Inter
     return Interpretation(intent, _clean_llm_params(params, catalog), f"llm:{provider.name}")
 
 
-# --------------------------------------------------------------------------- #
-# Orchestration
-# --------------------------------------------------------------------------- #
-# Guard 0: raw SQL or attempts to modify data are refused before anything else runs.
 _WRITE_ATTEMPT = re.compile(
     r"\b(drop|delete|truncate|alter|insert|update|remove|erase|wipe|modify|attach|pragma)\b"
     r"\s+(?:\w+\s+){0,3}?(table|database|index|view|from|into|data|records?|rows?|sales|everything|all)\b"
@@ -384,7 +405,6 @@ def interpret(question: str, catalog: dict, provider: BaseProvider | None) -> In
             "This assistant is read-only and does not run SQL. I can only answer questions about "
             "revenue and sales; I cannot modify or delete data.", source="guard")
 
-    # Guard 1 (both paths): refuse unresolvable terms instead of ignoring them.
     unknown = find_unknown_terms(question, catalog)
     if unknown:
         return _unsupported(
@@ -397,7 +417,6 @@ def interpret(question: str, catalog: dict, provider: BaseProvider | None) -> In
             result = llm_interpret(question, catalog, provider)
             if result.intent is not None:
                 return result
-            # LLM declined: give the deterministic rules a chance before refusing.
             fallback = rule_interpret(question, catalog)
             if fallback.intent is not None:
                 fallback.source = "rules (LLM declined)"

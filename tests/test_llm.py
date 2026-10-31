@@ -1,7 +1,3 @@
-"""LLM integration: every failure mode must degrade safely.
-
-The LLM is replaced by fakes (no model/network needed), plus a fake Ollama HTTP
-server to verify the real request/response contract of OllamaProvider."""
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -9,8 +5,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import httpx
 import pytest
 
-from app.interpreter import build_system_prompt, interpret
-from app.llm import BaseProvider, GeminiProvider, LLMError, OllamaProvider, get_provider
+from assistant.interpreter import build_system_prompt, interpret
+from assistant.llm import BaseProvider, GeminiProvider, LLMError, OllamaProvider, get_provider
 
 
 class FakeProvider(BaseProvider):
@@ -90,7 +86,6 @@ def test_guard_runs_before_llm_is_ever_called(catalog):
     assert p.calls == []                        # no tokens spent, nothing leaked to the model
 
 
-# ---- real HTTP contract of OllamaProvider, against a local fake server ---------
 class _FakeOllama(BaseHTTPRequestHandler):
     seen: dict = {}
     reply = {"message": {"content": '{"intent":"top_by","params":{"dimension":"product"}}'}}

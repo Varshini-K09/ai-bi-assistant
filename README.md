@@ -8,10 +8,10 @@ Ask questions about sales data in plain English and get an answer **plus the SQL
    + full ranking table, notes on exclusions, and the exact parameterised SQL used.
 ```
 
-* **Backend:** Python 3.10+, FastAPI, SQLite (standard library `sqlite3`)
+* **Backend:** Python 3.10+, Django + Django REST Framework, SQLite (standard library `sqlite3`)
 * **AI:** a *free* LLM used only to understand the question (Ollama local model by default; Gemini free tier optional; works with **no LLM at all** too)
 * **UI:** one dependency-free HTML page
-* **Tests:** 95 automated tests (pytest)
+* **Tests:** 129 automated tests (pytest)
 
 ---
 
@@ -43,11 +43,11 @@ ollama pull llama3.2:3b              # one-time ~2 GB download
 cp .env.example .env                 # Windows: copy .env.example .env
 
 # 3) run
-uvicorn app.main:app --reload
+python manage.py runserver
 # open http://127.0.0.1:8000
 ```
 
-**No LLM?** Set `LLM_PROVIDER=none` in `.env` (or run `LLM_PROVIDER=none uvicorn app.main:app`). Everything still works.
+**No LLM?** Set `LLM_PROVIDER=none` in `.env` (or run `LLM_PROVIDER=none python manage.py runserver`). Everything still works.
 
 **Gemini instead?** Put `LLM_PROVIDER=gemini` and `GEMINI_API_KEY=...` in `.env`. Free-tier model names change over time; adjust `GEMINI_MODEL` if needed.
 
@@ -62,7 +62,7 @@ The page footer also shows which interpreter is active, and each answer shows `i
 ### Run the tests
 
 ```bash
-pytest -q          # 95 tests, ~2 s, no LLM / network needed
+pytest -q          # 129 tests, ~3 s, no LLM / network needed
 ```
 
 ---
@@ -72,12 +72,15 @@ pytest -q          # 95 tests, ~2 s, no LLM / network needed
 | Question type | Example | Intent |
 |---|---|---|
 | Total revenue (optionally filtered) | "Total revenue for the North region in March" | `total_revenue` |
-| Best / worst product, category, region, channel | "Which product generated the highest revenue?" | `top_by` |
+| Best / worst product, category, region, channel (optionally top-N) | "Which product generated the highest revenue?", "Top 3 products by revenue" | `top_by` |
 | Monthly trend | "What is the monthly revenue trend?" | `monthly_trend` |
 | Change between two months | "How did revenue change between January and February?" | `month_comparison` |
+| Average order value (overall, filtered or per dimension) | "What is the average order value by region?" | `average_order_value` |
+| Orders and units sold (overall, filtered or per dimension) | "Which product sold the most units?", "How many orders?" | `sales_volume` |
+| Best / worst single month | "Which month had the lowest revenue?" | `month_extreme` |
 | Data quality | "Which records were rejected?" | `data_quality` |
 
-All **five** example questions from the brief are supported (the brief required four).
+All **five** example questions from the brief are supported (the brief required four), plus the extra intents above, which cover the most natural follow-up questions. Anything else is refused safely (see §6).
 
 ## 4. API
 
@@ -128,16 +131,17 @@ Result: 51 rows → 49 loaded, 2 rejected, 48 counted as revenue (1 returned).
 2. **No LLM-written SQL.** Nothing user- or LLM-supplied is ever concatenated into SQL; column names come from a fixed whitelist, values are bound parameters.
 3. **Read-only database connection** — even a bug cannot modify data.
 4. **Pre-LLM guards:** SQL/"delete/drop/update…" attempts are refused; unresolvable terms (`Central region`, `Q1`, `2025`, `iPhone`, `last month`) are refused rather than silently ignored (otherwise "revenue for Central" would return the overall total — a confidently wrong answer).
-5. **Prompt-injection resistant:** the guards run before the LLM is called, and even a fully compromised LLM can only choose among 5 fixed read-only intents.
+5. **Prompt-injection resistant:** the guards run before the LLM is called, and even a fully compromised LLM can only choose among 8 fixed read-only intents.
 6. **Transparency:** every answer shows its supporting rows, SQL, exclusions and which interpreter produced it.
 7. **Graceful degradation:** LLM down / timeout / malformed JSON → deterministic rules.
 
-## 7. Tests (95)
+## 7. Tests (129)
 
 | File | Covers |
 |---|---|
 | `tests/test_database.py` | cleaning rules, quarantine, ISO dates, read-only enforcement, missing file/columns |
 | `tests/test_analytics.py` | all five brief questions with independently-verified numbers, filters, **edge cases** (empty scope, ties), invalid params, injection |
+| `tests/test_new_intents.py` | top-N, average order value, units/orders, best/worst month — expected values recomputed independently from the raw CSV; routing of new phrasings; guards still hold |
 | `tests/test_interpreter.py` | 13 supported phrasings, `May` vs *may*, unknown terms, destructive input, ambiguity |
 | `tests/test_llm.py` | LLM failure modes via fakes **and a fake Ollama HTTP server** (request format, HTTP 500, not running, timeout, bad JSON, hallucinated intent, Gemini key never in URL) |
 | `tests/test_api.py` | HTTP status codes, response shape, all five brief questions end-to-end, no data change after attacks, no leaked internals |
@@ -153,6 +157,7 @@ The expected numbers (total ₹14,39,200; Monitor ₹4,73,000; South ₹4,11,200
 ## 9. Known limitations
 
 * Rule-based mode is keyword-driven: unusual phrasings may get "unsupported" (the LLM handles paraphrases better).
+* Revenue-based ranking only for top-N (units and average order value rank by their own metric); best/worst month is revenue-only.
 * No quarters, years, relative dates ("last month"), multi-value filters ("North and South"), profit, forecasts or follow-up questions with memory.
 * Single-turn: no conversation context.
 * One revenue definition; no per-unit discount interpretation.
@@ -163,17 +168,22 @@ The expected numbers (total ₹14,39,200; Monitor ₹4,73,000; South ₹4,11,200
 ## 10. Project layout
 
 ```
-app/
+manage.py
+bi_project/        Django project (settings.py, urls.py, wsgi.py, asgi.py)
+assistant/         Django app
   config.py        env-driven settings
   database.py      CSV → SQLite, validation, quarantine, read-only connection
   analytics.py     whitelisted intents → parameterised SQL (all numbers come from here)
   interpreter.py   LLM prompt + rule-based interpreter + safety guards
   llm.py           Ollama / Gemini clients
   service.py       one question end-to-end
-  main.py          FastAPI app
-  static/index.html  UI
+  runtime.py       one-time startup state (CSV→SQLite build, LLM provider)
+  serializers.py   DRF request validation
+  views.py         DRF views: /api/ask, /api/health, /api/examples, UI page
+  urls.py          routes
+  static/assistant/index.html  UI
 data/sales.csv     supplied data
-tests/             95 tests
+tests/             129 tests
 scripts/check_llm.py   live-LLM smoke test
 docs/              ARCHITECTURE.md, AI_USAGE.md, INTERVIEW_PREP.md
 ```

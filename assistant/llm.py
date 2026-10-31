@@ -1,13 +1,3 @@
-"""Thin LLM provider clients. Both providers have a free option:
-
-* OllamaProvider  - local open-source model (llama3.2, qwen2.5, ...). No account,
-                    no API key, no rate limits, data never leaves your machine.
-* GeminiProvider  - Google AI Studio free tier (needs a free API key).
-
-The LLM is used for ONE narrow job: turn a question into a small JSON object
-{"intent": ..., "params": {...}}. See interpreter.py for how that output is
-validated before it is trusted.
-"""
 from __future__ import annotations
 
 import httpx
@@ -38,8 +28,8 @@ class OllamaProvider(BaseProvider):
         payload = {
             "model": self.model,
             "stream": False,
-            "format": "json",                 # Ollama constrains output to valid JSON
-            "options": {"temperature": 0},    # deterministic routing
+            "format": "json",                 
+            "options": {"temperature": 0},    
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
@@ -77,7 +67,6 @@ class GeminiProvider(BaseProvider):
             "generationConfig": {"temperature": 0, "responseMimeType": "application/json"},
         }
         try:
-            # key goes in a header, never in the URL, so it cannot leak into logs
             resp = httpx.post(url, json=payload, headers={"x-goog-api-key": self.api_key},
                               timeout=self.timeout)
             resp.raise_for_status()

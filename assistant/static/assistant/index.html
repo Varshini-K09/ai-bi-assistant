@@ -68,7 +68,7 @@
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
 
-const MONEY_COLS = /revenue|sales|discount|price|change/i;
+const MONEY_COLS = /revenue|sales|discount|price|change|value/i;
 function fmtCell(col, v) {
   if (v === null || v === undefined) return "–";
   if (typeof v !== "number") return String(v);

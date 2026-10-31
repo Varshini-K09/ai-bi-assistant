@@ -1,9 +1,8 @@
-"""Data loading / cleaning tests."""
 import sqlite3
 
 import pytest
 
-from app.database import DataLoadError, build_database, get_readonly_connection
+from assistant.database import DataLoadError, build_database, get_readonly_connection
 
 HEADER = "Transaction_Id,Order_date,Product,Category,Region,Sales_channel,Quantity,Unit_price,Discount_amount,Status\n"
 
@@ -24,8 +23,7 @@ def test_supplied_csv_loads_49_valid_and_rejects_2(db_path, conn):
 
 def test_dates_are_stored_as_iso(conn):
     row = conn.execute("SELECT order_date FROM sales WHERE transaction_id='TXN0001'").fetchone()
-    assert row[0] == "2026-01-03"          # CSV had 03-01-2026 (DD-MM-YYYY)
-
+    assert row[0] == "2026-01-03"         
 
 def test_returned_order_is_kept_but_flagged(conn):
     row = conn.execute("SELECT status FROM sales WHERE transaction_id='TXN0033'").fetchone()

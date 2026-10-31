@@ -1,17 +1,3 @@
-"""Data layer: load the CSV into SQLite, clean it, quarantine bad rows.
-
-Design decisions
-----------------
-* SQLite: zero-setup, file based, SQL is the deterministic source of truth.
-* Two tables:
-    sales             -> validated rows only (what every analytic query reads)
-    rejected_records  -> rows that failed validation, with the reason, so
-                         nothing is silently dropped and the user can audit it
-* Dates arrive as DD-MM-YYYY and are stored as ISO (YYYY-MM-DD) so that
-  ``substr(order_date, 1, 7)`` gives a sortable 'YYYY-MM' month key.
-* The API opens the DB **read-only** (``mode=ro``), so even a bug in the query
-  layer cannot modify data.
-"""
 from __future__ import annotations
 
 import csv
@@ -84,13 +70,11 @@ def _validate_row(raw: dict[str, str], seen_ids: set[str]) -> tuple[dict | None,
         if not _clean_text(raw.get(col)):
             return None, f"Missing {col}"
 
-    # --- date (DD-MM-YYYY) -------------------------------------------------
     try:
         order_date = datetime.strptime(_clean_text(raw["Order_date"]), "%d-%m-%Y").date()
     except ValueError:
         return None, f"Invalid Order_date '{raw.get('Order_date')}' (expected DD-MM-YYYY)"
 
-    # --- numerics ------------------------------------------------------------
     try:
         quantity = int(float(_clean_text(raw.get("Quantity"))))
     except ValueError:

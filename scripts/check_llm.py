@@ -1,25 +1,16 @@
-"""Smoke-test the REAL configured LLM (Ollama / Gemini) in about 30 seconds.
-
-    python scripts/check_llm.py
-
-Sends paraphrased and adversarial questions through the interpreter and prints
-how each was routed. 'rules (LLM unavailable)' in the Source column means the
-LLM could not be reached or returned unusable output - the app still works, but
-you are not exercising the model. Exit code 1 if the LLM is never used.
-"""
 import sys
 import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import config  # noqa: E402
-from app.analytics import load_catalog  # noqa: E402
-from app.database import build_database, get_readonly_connection  # noqa: E402
-from app.interpreter import interpret  # noqa: E402
-from app.llm import LLMError, get_provider  # noqa: E402
+from assistant import config  
+from assistant.analytics import load_catalog 
+from assistant.database import build_database, get_readonly_connection  
+from assistant.interpreter import interpret  
+from assistant.llm import LLMError, get_provider 
 
-QUESTIONS = [  # (question, expected intent)
+QUESTIONS = [  
     ("What is the total revenue?", "total_revenue"),
     ("how much money did we make overall", "total_revenue"),
     ("Which item brought in the most money?", "top_by"),

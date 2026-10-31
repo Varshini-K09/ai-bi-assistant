@@ -2,12 +2,12 @@ import sys
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
+from rest_framework.test import APIClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.database import build_database, get_readonly_connection  # noqa: E402
-from app.main import create_app  # noqa: E402
+from assistant import runtime  # noqa: E402
+from assistant.database import build_database, get_readonly_connection  # noqa: E402
 
 CSV = Path(__file__).resolve().parent.parent / "data" / "sales.csv"
 
@@ -28,13 +28,12 @@ def conn(db_path):
 
 @pytest.fixture()
 def catalog(conn):
-    from app.analytics import load_catalog
+    from assistant.analytics import load_catalog
     return load_catalog(conn)
 
 
 @pytest.fixture()
 def client(tmp_path):
     """API client running WITHOUT an LLM (deterministic rule-based interpreter)."""
-    app = create_app(csv_path=CSV, db_path=tmp_path / "api.db", provider=None)
-    with TestClient(app) as c:
-        yield c
+    runtime.initialize(csv_path=CSV, db_path=tmp_path / "api.db", provider=None)
+    return APIClient()

@@ -1,7 +1,7 @@
 """Rule-based interpreter + safety guards (no LLM involved)."""
 import pytest
 
-from app.interpreter import find_unknown_terms, interpret, parse_months
+from assistant.interpreter import find_unknown_terms, interpret, parse_months
 
 
 def ask(q, catalog):
@@ -78,7 +78,6 @@ def test_unknown_term_finder_ignores_known_words(catalog):
     assert find_unknown_terms("revenue by product category in March for the North region", catalog) == []
 
 
-# ---- regressions found by scripts/check_llm.py -------------------------------
 def test_filler_words_do_not_trigger_unknown_term_guard(catalog):
     r = ask("Which item brought in the most money?", catalog)
     assert (r.intent, r.params["dimension"]) == ("top_by", "product")
